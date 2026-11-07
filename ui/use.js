@@ -1343,6 +1343,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
         loadKeyStatus(line);
         // Ollama panel
         const olUrl = el("input", { type: "text", placeholder: "http://127.0.0.1:11434", autocomplete: "off" });
+        const olKey = el("input", { type: "text", placeholder: "only if your Ollama server asks for one", autocomplete: "off" });
         const olStatus = el("span", { class: "card-hint", text: "" });
         const olSelect = el("select", {});
         const olNote = el("p", { class: "hint", text: "Use a model of 27B or more (70B or more for the full, reliable experience): smaller models may be really bad — she loses her character, forgets and breaks her replies. Install Ollama from ollama.com, run ollama pull gemma3:27b (17 GB), press Detect models, pick it, press Use this model, and she runs entirely on this computer — her memory search already does. A 27B model needs about 19 GB of GPU memory next to her own ~6 GB (~10 GB with her eyes): one 32 GB card holds it; with less, run Ollama on another PC (put its address above) or choose OpenRouter, in almost all cases the better choice." });
@@ -1360,6 +1361,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
           try {
             const info = await getJSON("/api/build_f/ollama");
             if (!olUrl.value.trim()) olUrl.value = info.base_url || "http://127.0.0.1:11434";
+            if (info.api_key_set && !olKey.value) olKey.placeholder = "✓ key saved — type to replace";
             const models = info.models || [];
             olSelect.replaceChildren(...(models.length ? models.map((m) => el("option", { value: m.name, text: m.name + (m.parameter_size ? " · " + m.parameter_size : "") + (m.size_gb ? " · " + m.size_gb + " GB" : "") }))
                                                        : [el("option", { value: "", text: "— detect models first —" })]));
@@ -1373,13 +1375,13 @@ registerProcessor('pcm-pusher', PCMPusher);`;
         const detect = button("Detect models", async () => {
           detect.disabled = true; olStatus.textContent = "asking Ollama…";
           try {
-            const r = await postAction("/api/build_f/ollama/detect", "ollama-detect", { base_url: olUrl.value.trim() });
+            const r = await postAction("/api/build_f/ollama/detect", "ollama-detect", { base_url: olUrl.value.trim(), api_key: olKey.value.trim() });
             toast((r.models || []).length ? (r.models || []).length + " local model(s) found." : "Ollama answered, but has no models: ollama pull gemma3:27b (or another model of 27B or more)", !(r.models || []).length);
             await loadOllamaPanel();
           } catch (error) { olStatus.textContent = String(error.message || error); toast(String(error.message || error), true); }
           finally { detect.disabled = false; }
         }, "small");
-        olPanel.append(el("div", { class: "form-row" }, el("div", { class: "field", style: "flex:2" }, el("label", { text: "Ollama server" }), olUrl), detect), olStatus,
+        olPanel.append(el("div", { class: "form-row" }, el("div", { class: "field", style: "flex:2" }, el("label", { text: "Ollama server" }), olUrl), el("div", { class: "field", style: "flex:2" }, el("label", { text: "API key" }), olKey), detect), olStatus,
           el("div", { class: "form-row" }, el("div", { class: "field", style: "flex:2" }, el("label", { text: "Model for all four roles" }), olSelect), useBtn), olNote);
         body.append(choice, orPanel, olPanel);
         // start on whichever she already uses

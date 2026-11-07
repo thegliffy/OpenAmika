@@ -46,7 +46,7 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 APP = 'OpenAmika'
@@ -141,9 +141,10 @@ def port_open(port, host='127.0.0.1', timeout=0.5):
         return sock.connect_ex((host, int(port))) == 0
 
 
-def http_json(url, timeout=2):
+def http_json(url, timeout=2, api_key=None):
+    headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
     try:
-        with urlopen(url, timeout=timeout) as response:
+        with urlopen(Request(url, headers=headers), timeout=timeout) as response:
             body = response.read()
     except Exception:
         return None
@@ -330,6 +331,14 @@ def ollama_base():
     return url if re.fullmatch(r'https?://[A-Za-z0-9._\-\[\]]+(?::\d{1,5})?', url) else OLLAMA_DEFAULT
 
 
+def ollama_key():
+    """The Ollama server's API key: config/ollama.json api_key (Setup → Brain), empty when the server takes none."""
+    try:
+        return str(json.loads((ROOT / 'config' / 'ollama.json').read_text('utf-8-sig')).get('api_key') or '')
+    except Exception:
+        return ''
+
+
 def ollama_checks():
     """[(level, name, detail)] when a role runs on Ollama: the server answers (GET /api/version) and every model in
     use is pulled (GET /api/tags). Nothing when no role uses Ollama."""
@@ -337,12 +346,13 @@ def ollama_checks():
     if not models:
         return []
     base = ollama_base()
-    version = http_json(base + '/api/version', timeout=3)
+    key = ollama_key()
+    version = http_json(base + '/api/version', timeout=3, api_key=key)
     if not isinstance(version, dict) or '_text' in version:
         roles = sorted({r for rs in models.values() for r in rs})
         return [('err', 'Ollama', f'not answering at {base} — start Ollama (or fix its address on Setup → Brain); '
                                   f'{", ".join(roles)} run{"s" if len(roles) == 1 else ""} on it')]
-    tags = http_json(base + '/api/tags', timeout=5)
+    tags = http_json(base + '/api/tags', timeout=5, api_key=key)
     pulled = {str(m.get('name') or m.get('model') or '') for m in (tags or {}).get('models') or [] if isinstance(m, dict)} \
         if isinstance(tags, dict) else set()
     out = [('ok', 'Ollama', f"{version.get('version') or '?'} at {base}")]

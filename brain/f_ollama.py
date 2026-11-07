@@ -75,6 +75,7 @@ def load_ollama_config(root):
         num_ctx = DEFAULT_NUM_CTX
     models = [m for m in (_model_row(r) for r in (doc.get("models") or [])) if m]
     return {"base_url": base, "num_ctx": num_ctx, "keep_alive": str(doc.get("keep_alive") or KEEP_ALIVE),
+            "api_key": str(doc.get("api_key") or ""),
             "models": models, "detected_at": doc.get("detected_at"), "version": doc.get("version")}
 
 
@@ -97,12 +98,18 @@ def _check(response):
             pass
 
 
-def discover(http, base_url, *, timeout=(3, 10), show=True):
+def _auth(api_key):
+    """Bearer header for an Ollama server that asks for an API key (plain Ollama never does; ours can)."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def discover(http, base_url, *, timeout=(3, 10), show=True, api_key=""):
     """What this Ollama serves: {version, models:[{name, family, parameter_size, quantization, size_gb,
     context_length, thinking, vision}]}. Read-only; raises when the server does not answer."""
     base = ollama_base_url(base_url)
-    version = str((_check(http.get(base + "/api/version", timeout=timeout)) or {}).get("version") or "")
-    rows = (_check(http.get(base + "/api/tags", timeout=timeout)) or {}).get("models") or []
+    hdr = _auth(api_key)
+    version = str((_check(http.get(base + "/api/version", headers=hdr, timeout=timeout)) or {}).get("version") or "")
+    rows = (_check(http.get(base + "/api/tags", headers=hdr, timeout=timeout)) or {}).get("models") or []
     models = []
     for row in rows:
         if not isinstance(row, dict):
@@ -118,7 +125,7 @@ def discover(http, base_url, *, timeout=(3, 10), show=True):
                 "context_length": None, "thinking": False, "vision": False}
         if show:
             try:
-                info = _check(http.post(base + "/api/show", json={"model": item["name"]}, timeout=timeout)) or {}
+                info = _check(http.post(base + "/api/show", headers=hdr, json={"model": item["name"]}, timeout=timeout)) or {}
                 caps = info.get("capabilities") if isinstance(info.get("capabilities"), list) else []
                 item["thinking"] = "thinking" in caps
                 item["vision"] = "vision" in caps
@@ -156,7 +163,8 @@ def ollama_role_config(ollama, model_name, role, *, reasoning_enabled=None, max_
             "reasoning": {"enabled": thinking} if row.get("thinking") else None,
             "reasoning_enabled": thinking, "mandatory_reasoning": False, "think_supported": bool(row.get("thinking")),
             "max_price": {"prompt": 0.0, "completion": 0.0, "request": 0.0}, "reservation_input_rate": 0.0,
-            "base_url": ollama.get("base_url") or DEFAULT_URL, "num_ctx": num_ctx,
+            "base_url": ollama.get("base_url") or DEFAULT_URL, "api_key": str(ollama.get("api_key") or ""),
+            "num_ctx": num_ctx,
             "keep_alive": str(ollama.get("keep_alive") or KEEP_ALIVE), "json_mode": "json_object",
             "endpoint_context_tokens": row.get("context_length"), "endpoint_max_completion_tokens": None,
             "supported_parameters": [], "structured_outputs_advertised": False,
@@ -189,9 +197,11 @@ class OllamaClient(OpenRouterClient):
     """Native Ollama chat with the OpenRouter client's receipts, metering and drain. Zero cost."""
     transport = OLLAMA
 
-    def __init__(self, http, before_call, after_call, *, base_url, timeout=(10, 600), event_sink=None, drainer=None):
+    def __init__(self, http, before_call, after_call, *, base_url, timeout=(10, 600), event_sink=None, drainer=None,
+                 api_key=""):
         super().__init__(http, "local", before_call, after_call, timeout=timeout, event_sink=event_sink, drainer=drainer)
         self.chat_url = ollama_base_url(base_url) + "/api/chat"
+        self.api_key = str(api_key or "")
 
     def _chat_body(self, config, messages, *, stream, json_schema=None):
         return make_ollama_body(config, messages, stream=stream, json_schema=json_schema)
@@ -211,7 +221,10 @@ class OllamaClient(OpenRouterClient):
         return usage
 
     def _post(self, url, body, stream):
-        response = self.http.post(url, headers={"Content-Type": "application/json"}, json=body, stream=stream,
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        response = self.http.post(url, headers=headers, json=body, stream=stream,
                                   timeout=self.timeout, allow_redirects=False)
         status = getattr(response, "status_code", 200)
         if status >= 400:
@@ -333,10 +346,11 @@ def install_ollama(g):
         ollama = manager.ollama if manager is not None else load_ollama_config(root)
         out = {"ok": True, "base_url": ollama["base_url"], "num_ctx": ollama["num_ctx"], "keep_alive": ollama["keep_alive"],
                "detected_at": ollama.get("detected_at"), "version": ollama.get("version"), "models": ollama["models"],
+               "api_key_set": bool(ollama.get("api_key")),
                "reachable": None, "live_version": None, "error": None, "in_use": in_use(manager)}
         if probe:
             try:
-                data = _check(g["http_requests"].get(ollama["base_url"] + "/api/version", timeout=(2, 3))) or {}
+                data = _check(g["http_requests"].get(ollama["base_url"] + "/api/version", headers=_auth(ollama.get("api_key")), timeout=(2, 3))) or {}
                 out["reachable"], out["live_version"] = True, str(data.get("version") or "")
             except Exception as error:
                 out["reachable"], out["error"] = False, str(error)[:160]
@@ -355,12 +369,14 @@ def install_ollama(g):
             if num_ctx is not None and (isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or not MIN_NUM_CTX <= num_ctx <= 131072):
                 raise ValueError(f"num_ctx must be an integer between {MIN_NUM_CTX} and 131072.")
             current = load_ollama_config(root)
+            key = str(value.get("api_key") or "").strip() or current["api_key"]
             try:
-                found = discover(g["http_requests"], base)
+                found = discover(g["http_requests"], base, api_key=key)
             except Exception as error:
                 return jsonify({"ok": False, "error": f"Ollama is not answering at {base} — is it running? "
                                                       f"(install it from ollama.com, then start it) · {str(error)[:120]}"}), 503
             doc = {"base_url": base, "num_ctx": num_ctx or current["num_ctx"], "keep_alive": current["keep_alive"],
+                   "api_key": key,
                    "models": found["models"], "version": found["version"],
                    "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
             save_ollama_config(root, doc)

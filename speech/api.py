@@ -167,6 +167,9 @@ UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 if UI_DIR.is_dir():
     app.mount("/ui", StaticFiles(directory=str(UI_DIR)), name="ui")
 
+import f_auth  # fork: browser login gate (speech/f_auth.py)
+f_auth.install(app)
+
 
 @app.middleware("http")
 async def _revalidate_page_assets(request: Request, call_next):

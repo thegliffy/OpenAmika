@@ -1153,7 +1153,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     const box = el("div", { class: "oa-wizard", role: "dialog", "aria-modal": "true", "aria-label": "Meet " + amika });
     backdrop.append(box);
     document.body.append(backdrop);
-    const TOTAL = 5;
+    const TOTAL = 6;
     let step = 0, keyStatus = null, lastHealth = null;
     const face = { wrap: null, canvas: null, badge: null, live: avatarReady && avatar.hasModel };
 
@@ -1161,7 +1161,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     // portrait) or a plain <audio> when there is no model. The first line cannot start before a click
     // (browser rule): the portrait then shows "click to hear her" and the next click plays it.
     let audioOK = false, pendingLine = null;
-    const LINE_EMOTION = ["casual_happy", "intimate_caring", "casual_very_happy", "casual_smile", "casual_happy"];
+    const LINE_EMOTION = ["casual_happy", "intimate_caring", "casual_very_happy", "casual_smile", "casual_smile", "casual_happy"];
     const WIZARD_VOICE = "happy1";   // the V1 voice tag for every wizard line (owner's pick: the soft happy; happy2 sounded harsh)
     const setSpeaking = (on) => { if (face.wrap) face.wrap.classList.toggle("speaking", !!on); };
     const showTap = (line) => { pendingLine = line; if (face.badge) face.badge.hidden = false; };
@@ -1200,6 +1200,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       `${state.name}. Got it. So… which city are we in? I want to go out and explore.`,
       `${state.city}! I'm so excited to be here — new streets, new supermarkets, new everything. Okay. Let's get me set up so I can actually talk to you.`,
       `First, my brain. I think best through OpenRouter — just paste a key, it only costs a few dollars a month. I can also run entirely on your own computer with Ollama, but only with a big model and a big graphics card.`,
+      `And this lock is mine alone — a username and a password, just for us. The first ones you give me become the only key there is.`,
       `Last one — let me check I can hear you and that you can hear me.`,
     ];
     const speakCurrent = () => speak(lines()[step], LINE_EMOTION[step]);
@@ -1387,8 +1388,28 @@ registerProcessor('pcm-pusher', PCMPusher);`;
           pick(["surface", "deep", "reflection", "memory_write"].map(t).every((k) => k === "ollama") ? "ollama" : "openrouter");
         }).catch(() => pick("openrouter"));
         actions.append(button("← Back", () => go(2), "small"), button("Skip for now", () => go(4), "small skip"), button("Next →", () => go(4), "primary"));
-      } else {
+      } else if (step === 4) {
+        // account step (fork): first-run login sets the one account; after that it just signs in
         box.append(say(lines()[4]));
+        const u = el("input", { type: "text", placeholder: "username", autocomplete: "username" });
+        const p = el("input", { type: "password", placeholder: "password", autocomplete: "off" });
+        const lockBtn = button("Lock it", async () => {
+          try {
+            const r = await fetch("/login", { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ username: u.value.trim(), password: p.value }) });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(j.error || "failed");
+            toast(j.created ? "Locked — only you hold the key now." : "Signed in.");
+            go(5);
+          } catch (error) { toast(String(error.message || error), true); }
+        }, "primary");
+        body.append(el("div", { class: "form-row" },
+          el("div", { class: "field", style: "flex:2" }, el("label", { text: "Username" }), u),
+          el("div", { class: "field", style: "flex:2" }, el("label", { text: "Password (8+ characters)" }), p)),
+          el("p", { class: "hint", text: "The first username and password you give her become the only account there is — it cannot be reset from outside. After that, the login page at /login is the way back in." }));
+        actions.append(button("← Back", () => go(3), "small"), lockBtn);
+      } else {
+        box.append(say(lines()[5]));
         const rows = el("div", { class: "check" });
         const verdict = el("p", { class: "verdict" });
         const next = button("Start talking", finish, "primary");

@@ -218,6 +218,8 @@ def make_ollama_body(config, messages, *, stream=True, json_schema=None):
         wants_json = config["role"] == "memory_write" or json_schema is not None
         if wants_json:
             body["response_format"] = {"type": "json_object"}
+        if isinstance(config.get("reasoning"), dict):   # the switch the role grid actually set
+            body["reasoning"] = dict(config["reasoning"])
         return body
     body = {"model": config["api_model"], "messages": copy.deepcopy(messages), "stream": bool(stream),
             "keep_alive": config.get("keep_alive") or KEEP_ALIVE,

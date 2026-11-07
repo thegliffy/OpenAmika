@@ -316,3 +316,35 @@ class OpenAIDialectTests(unittest.TestCase):
         self.assertEqual(url, "http://127.0.0.1:11434/v1/chat/completions")
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer k")
         self.assertEqual(self.receipts[0][1]["status"], "complete")
+
+
+class OpenAIDialectReasoningTests(unittest.TestCase):
+    """The per-role thinking switch travels on the OpenAI wire when the model can think."""
+
+    def setUp(self):
+        thinking_rows = [{"name": "qwen3:14b", "family": "", "parameter_size": "", "quantization": "",
+                          "size_gb": None, "context_length": 262144, "thinking": True, "vision": True}]
+        self.ollama = {"base_url": "http://127.0.0.1:11434", "num_ctx": 16384, "keep_alive": "30m",
+                       "dialect": "openai", "api_key": "k", "models": thinking_rows}
+
+    def test_fast_roles_ask_for_thinking_off(self):
+        cfg = ollama_role_config(self.ollama, "qwen3:14b", "surface", reasoning_enabled=False)
+        body = make_ollama_body(cfg, [{"role": "user", "content": "u"}])
+        self.assertEqual(body["reasoning"], {"enabled": False})
+
+    def test_reflection_role_asks_for_thinking_on(self):
+        cfg = ollama_role_config(self.ollama, "qwen3:14b", "reflection", reasoning_enabled=True)
+        body = make_ollama_body(cfg, [{"role": "user", "content": "u"}])
+        self.assertEqual(body["reasoning"], {"enabled": True})
+
+    def test_no_switch_when_the_model_cannot_think(self):
+        self.ollama["models"][0]["thinking"] = False
+        cfg = ollama_role_config(self.ollama, "qwen3:14b", "surface", reasoning_enabled=True)
+        body = make_ollama_body(cfg, [{"role": "user", "content": "u"}])
+        self.assertNotIn("reasoning", body)
+
+    def test_native_dialect_still_uses_the_think_field(self):
+        cfg = ollama_role_config(dict(self.ollama, dialect="ollama"), "qwen3:14b", "surface", reasoning_enabled=False)
+        body = make_ollama_body(cfg, [{"role": "user", "content": "u"}])
+        self.assertEqual(body["think"], False)
+        self.assertNotIn("reasoning", body)

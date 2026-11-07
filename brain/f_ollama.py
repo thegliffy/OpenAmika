@@ -19,9 +19,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from f_memory import _write
-from f_openrouter import MAX_OUTPUT_TOKENS, OpenRouterClient, OpenRouterError, ROLES, normalize_usage
+from f_openrouter import MAX_OUTPUT_TOKENS, OpenRouterClient, OpenRouterError, ROLES, make_chat_body, normalize_usage
 
 OLLAMA = "ollama"
+OPENAI_DIALECT = "openai"         # config/ollama.json "dialect": speak OpenAI's /v1 API instead of Ollama's NDJSON
 DEFAULT_URL = "http://127.0.0.1:11434"
 CONFIG_NAME = "ollama.json"
 DEFAULT_NUM_CTX = 16384        # her prompts are ~8k tokens; leave room for history growth and the answer
@@ -74,8 +75,11 @@ def load_ollama_config(root):
     if isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or num_ctx < MIN_NUM_CTX:
         num_ctx = DEFAULT_NUM_CTX
     models = [m for m in (_model_row(r) for r in (doc.get("models") or [])) if m]
+    dialect = str(doc.get("dialect") or "ollama").strip().lower()
+    if dialect not in ("ollama", OPENAI_DIALECT):
+        dialect = "ollama"
     return {"base_url": base, "num_ctx": num_ctx, "keep_alive": str(doc.get("keep_alive") or KEEP_ALIVE),
-            "api_key": str(doc.get("api_key") or ""),
+            "api_key": str(doc.get("api_key") or ""), "dialect": dialect,
             "models": models, "detected_at": doc.get("detected_at"), "version": doc.get("version")}
 
 
@@ -103,11 +107,33 @@ def _auth(api_key):
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
-def discover(http, base_url, *, timeout=(3, 10), show=True, api_key=""):
+def discover(http, base_url, *, timeout=(3, 10), show=True, api_key="", dialect="ollama", keep=()):
     """What this Ollama serves: {version, models:[{name, family, parameter_size, quantization, size_gb,
-    context_length, thinking, vision}]}. Read-only; raises when the server does not answer."""
+    context_length, thinking, vision}]}. Read-only; raises when the server does not answer.
+    fork: dialect "openai" reads GET /v1/models instead of /api/tags + /api/show; the OpenAI list
+    reports n_ctx and input modalities but no thinking flag, so thinking stays as saved (keep)."""
     base = ollama_base_url(base_url)
     hdr = _auth(api_key)
+    if str(dialect or "ollama") == OPENAI_DIALECT:
+        saved = {str(m.get("name") or ""): m for m in (keep or []) if isinstance(m, dict)}
+        data = _check(http.get(base + "/v1/models", headers=hdr, timeout=timeout)) or {}
+        models = []
+        for row in data.get("data") or []:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"].strip():
+                continue
+            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            arch = row.get("architecture") if isinstance(row.get("architecture"), dict) else {}
+            modalities = arch.get("input_modalities") if isinstance(arch.get("input_modalities"), list) else []
+            old = saved.get(row["id"].strip(), {})
+            ctx = meta.get("n_ctx")
+            models.append(_model_row({"name": row["id"].strip(), "family": str(meta.get("name") or ""),
+                                      "parameter_size": "", "quantization": "", "size_gb": None,
+                                      "context_length": ctx if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0 else old.get("context_length"),
+                                      "thinking": bool(old.get("thinking")),
+                                      "vision": ("image" in modalities) if modalities else bool(old.get("vision"))}))
+        models = [m for m in models if m]
+        models.sort(key=lambda m: m["name"])
+        return {"version": "", "models": models}
     version = str((_check(http.get(base + "/api/version", headers=hdr, timeout=timeout)) or {}).get("version") or "")
     rows = (_check(http.get(base + "/api/tags", headers=hdr, timeout=timeout)) or {}).get("models") or []
     models = []
@@ -167,7 +193,9 @@ def ollama_role_config(ollama, model_name, role, *, reasoning_enabled=None, max_
             "num_ctx": num_ctx,
             "keep_alive": str(ollama.get("keep_alive") or KEEP_ALIVE), "json_mode": "json_object",
             "endpoint_context_tokens": row.get("context_length"), "endpoint_max_completion_tokens": None,
-            "supported_parameters": [], "structured_outputs_advertised": False,
+            "supported_parameters": [],
+            "structured_outputs_advertised": (str(ollama.get("dialect") or "ollama") == OPENAI_DIALECT),
+            "dialect": str(ollama.get("dialect") or "ollama"),
             "family": row.get("family") or "", "parameter_size": row.get("parameter_size") or ""}
 
 
@@ -182,6 +210,15 @@ def make_ollama_body(config, messages, *, stream=True, json_schema=None):
             raise ValueError("Only system, user, and assistant text messages are supported")
         if not isinstance(message.get("content"), str):
             raise ValueError("This transport accepts text-only messages")
+    if str(config.get("dialect") or "ollama") == OPENAI_DIALECT:
+        # Standard OpenAI chat body: max_tokens top-level (a plain server never reads the ollama
+        # options block); usage comes back on the final SSE event.
+        body = {"model": config["api_model"], "messages": copy.deepcopy(messages), "stream": bool(stream),
+                "max_tokens": int(config["max_tokens"]), "stream_options": {"include_usage": True}}
+        wants_json = config["role"] == "memory_write" or json_schema is not None
+        if wants_json:
+            body["response_format"] = {"type": "json_object"}
+        return body
     body = {"model": config["api_model"], "messages": copy.deepcopy(messages), "stream": bool(stream),
             "keep_alive": config.get("keep_alive") or KEEP_ALIVE,
             "options": {"num_ctx": int(config["num_ctx"]), "num_predict": int(config["max_tokens"])}}
@@ -198,12 +235,15 @@ class OllamaClient(OpenRouterClient):
     transport = OLLAMA
 
     def __init__(self, http, before_call, after_call, *, base_url, timeout=(10, 600), event_sink=None, drainer=None,
-                 api_key=""):
+                 api_key="", dialect="ollama"):
         super().__init__(http, "local", before_call, after_call, timeout=timeout, event_sink=event_sink, drainer=drainer)
-        self.chat_url = ollama_base_url(base_url) + "/api/chat"
+        self.dialect = str(dialect or "ollama")        # fork: "openai" = OpenAI-dialect server (juno's Strata)
+        self.chat_url = ollama_base_url(base_url) + ("/v1/chat/completions" if self.dialect == OPENAI_DIALECT else "/api/chat")
         self.api_key = str(api_key or "")
 
     def _chat_body(self, config, messages, *, stream, json_schema=None):
+        if self.dialect == OPENAI_DIALECT:
+            return make_chat_body(config, messages, stream=stream, json_schema=json_schema)
         return make_ollama_body(config, messages, stream=stream, json_schema=json_schema)
 
     def _reservation(self, config, body):
@@ -267,6 +307,8 @@ class OllamaClient(OpenRouterClient):
 
     def _stream_line(self, config, receipt, line, started):
         """One NDJSON line: None = skip, True = done, else the content delta."""
+        if self.dialect == OPENAI_DIALECT:
+            return OpenRouterClient._stream_line(self, config, receipt, line, started)
         if isinstance(line, bytes):
             line = line.decode("utf-8")
         line = (line or "").strip()
@@ -286,6 +328,8 @@ class OllamaClient(OpenRouterClient):
         return text or ""
 
     def complete(self, config, messages, *, metadata=None, json_schema=None):
+        if self.dialect == OPENAI_DIALECT:
+            return OpenRouterClient.complete(self, config, messages, metadata=metadata, json_schema=json_schema)
         body = self._chat_body(config, messages, stream=False, json_schema=json_schema)
         handle, receipt = self._prepare(config, body, metadata, self.chat_url)
         started = time.perf_counter()
@@ -346,12 +390,16 @@ def install_ollama(g):
         ollama = manager.ollama if manager is not None else load_ollama_config(root)
         out = {"ok": True, "base_url": ollama["base_url"], "num_ctx": ollama["num_ctx"], "keep_alive": ollama["keep_alive"],
                "detected_at": ollama.get("detected_at"), "version": ollama.get("version"), "models": ollama["models"],
-               "api_key_set": bool(ollama.get("api_key")),
+               "api_key_set": bool(ollama.get("api_key")), "dialect": str(ollama.get("dialect") or "ollama"),
                "reachable": None, "live_version": None, "error": None, "in_use": in_use(manager)}
         if probe:
             try:
-                data = _check(g["http_requests"].get(ollama["base_url"] + "/api/version", headers=_auth(ollama.get("api_key")), timeout=(2, 3))) or {}
-                out["reachable"], out["live_version"] = True, str(data.get("version") or "")
+                if str(ollama.get("dialect") or "ollama") == OPENAI_DIALECT:
+                    data = _check(g["http_requests"].get(ollama["base_url"] + "/v1/models", headers=_auth(ollama.get("api_key")), timeout=(2, 3))) or {}
+                    out["reachable"], out["live_version"] = True, "openai" if (data.get("data") or data.get("models")) else "?"
+                else:
+                    data = _check(g["http_requests"].get(ollama["base_url"] + "/api/version", headers=_auth(ollama.get("api_key")), timeout=(2, 3))) or {}
+                    out["reachable"], out["live_version"] = True, str(data.get("version") or "")
             except Exception as error:
                 out["reachable"], out["error"] = False, str(error)[:160]
         return out
@@ -370,13 +418,16 @@ def install_ollama(g):
                 raise ValueError(f"num_ctx must be an integer between {MIN_NUM_CTX} and 131072.")
             current = load_ollama_config(root)
             key = str(value.get("api_key") or "").strip() or current["api_key"]
+            dialect = str(value.get("dialect") or current["dialect"]).strip().lower()
+            if dialect not in ("ollama", OPENAI_DIALECT):
+                raise ValueError("dialect must be ollama or openai.")
             try:
-                found = discover(g["http_requests"], base, api_key=key)
+                found = discover(g["http_requests"], base, api_key=key, dialect=dialect, keep=current["models"])
             except Exception as error:
                 return jsonify({"ok": False, "error": f"Ollama is not answering at {base} — is it running? "
                                                       f"(install it from ollama.com, then start it) · {str(error)[:120]}"}), 503
             doc = {"base_url": base, "num_ctx": num_ctx or current["num_ctx"], "keep_alive": current["keep_alive"],
-                   "api_key": key,
+                   "api_key": key, "dialect": dialect,
                    "models": found["models"], "version": found["version"],
                    "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
             save_ollama_config(root, doc)

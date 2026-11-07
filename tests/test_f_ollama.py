@@ -233,3 +233,86 @@ class RoleManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# appended to tests/test_f_ollama.py — the OpenAI dialect on the Ollama panel (fork)
+class OpenAIDialectTests(unittest.TestCase):
+    """An OpenAI-dialect server wired through the Ollama panel: same rows and roles, wire is OpenAI."""
+
+    def setUp(self):
+        self.ollama = {"base_url": "http://127.0.0.1:11434", "num_ctx": 16384, "keep_alive": "30m",
+                       "dialect": "openai", "api_key": "k", "models": MODELS}
+        self.http = HTTP()
+        self.handles, self.receipts = [], []
+        self.client = OllamaClient(self.http, lambda request: self.handles.append(request) or "h1",
+                                   lambda handle, receipt: self.receipts.append((handle, receipt)),
+                                   base_url="http://127.0.0.1:11434", api_key="k", dialect="openai")
+
+    def test_config_roundtrip_keeps_dialect_and_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            save_ollama_config(root, dict(self.ollama, detected_at="t"))
+            doc = load_ollama_config(root)
+            self.assertEqual((doc["dialect"], doc["api_key"]), ("openai", "k"))
+
+    def test_role_config_advertises_structured_outputs(self):
+        cfg = ollama_role_config(self.ollama, "qwen3:14b", "deep", reasoning_enabled=False)
+        self.assertTrue(cfg["structured_outputs_advertised"])
+        plain = ollama_role_config(dict(self.ollama, dialect="ollama"), "qwen3:14b", "deep")
+        self.assertFalse(plain["structured_outputs_advertised"])
+
+    def test_body_is_standard_openai(self):
+        cfg = ollama_role_config(self.ollama, "qwen3:14b", "deep", reasoning_enabled=False)
+        body = make_ollama_body(cfg, [{"role": "user", "content": "u"}])
+        self.assertEqual(body["max_tokens"], cfg["max_tokens"])      # top level, not options.num_predict
+        self.assertNotIn("options", body)
+        self.assertNotIn("think", body)
+        self.assertNotIn("response_format", body)                    # plain roles ask for nothing special
+        wcfg = ollama_role_config(self.ollama, "qwen3:14b", "memory_write", reasoning_enabled=True)
+        wbody = make_ollama_body(wcfg, [{"role": "user", "content": "answer in JSON"}, {"role": "user", "content": "u"}])
+        self.assertEqual(wbody["response_format"], {"type": "json_object"})
+
+    def test_discover_reads_the_openai_model_list(self):
+        saved = [{"name": "glm-4.7-flash", "thinking": True, "context_length": 131072, "vision": False}]
+        self.http.responses = [Response(data={"object": "list", "data": [
+            {"id": "glm-4.7-flash",
+             "meta": {"name": "strata", "n_ctx": 262144},
+             "architecture": {"input_modalities": ["text", "image"]}}]})]
+        found = discover(self.http, "http://127.0.0.1:11434", api_key="k", dialect="openai", keep=saved)
+        self.assertEqual(found["models"][0]["name"], "glm-4.7-flash")
+        self.assertEqual(found["models"][0]["context_length"], 262144)
+        self.assertTrue(found["models"][0]["vision"])
+        self.assertTrue(found["models"][0]["thinking"])              # the list has no thinking flag; kept from saved
+        url, kwargs = self.http.calls[0]
+        self.assertEqual(url, "http://127.0.0.1:11434/v1/models")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer k")
+
+    def test_stream_parses_sse_and_settles_zero_cost(self):
+        cfg = ollama_role_config(self.ollama, "qwen3:14b", "deep", reasoning_enabled=False)
+        self.http.responses = [Response(lines=[
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {"content": "hi"}}]}),
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {"content": " there"}}]}),
+            "data: " + json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}),
+            "data: [DONE]"])]
+        text = "".join(self.client.stream(cfg, [{"role": "user", "content": "u"}], metadata={"phase": "deep", "turn_id": "t1"}))
+        self.assertEqual(text, "hi there")
+        url, kwargs = self.http.calls[0]
+        self.assertEqual(url, "http://127.0.0.1:11434/v1/chat/completions")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer k")
+        self.assertEqual(kwargs["json"]["stream_options"], {"include_usage": True})
+        handle, receipt = self.receipts[0]
+        self.assertEqual((receipt["status"], receipt["cost_usd"]), ("complete", 0.0))
+
+    def test_complete_reads_the_openai_message(self):
+        cfg = ollama_role_config(self.ollama, "qwen3:14b", "deep", reasoning_enabled=False)
+        self.http.responses = [Response(data={
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "pong"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}})]
+        result = self.client.complete(cfg, [{"role": "user", "content": "ping"}], metadata={"phase": "deep", "turn_id": "t2"})
+        self.assertEqual(result["text"], "pong")
+        url, kwargs = self.http.calls[0]
+        self.assertEqual(url, "http://127.0.0.1:11434/v1/chat/completions")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer k")
+        self.assertEqual(self.receipts[0][1]["status"], "complete")

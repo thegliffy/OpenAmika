@@ -452,7 +452,7 @@ def install_roles(g, root, memory, meter, scope, local, pricing):
     def client(config=None):
         if config is not None and config.get("transport") == OLLAMA:
             return OllamaClient(g["http_requests"], before, after, base_url=config["base_url"], event_sink=event_sink,
-                                api_key=config.get("api_key") or "")
+                                api_key=config.get("api_key") or "", dialect=config.get("dialect") or "ollama")
         if config is not None and config.get("transport") == ALIBABA:
             key = g.get("DASHSCOPE_KEY") or os.getenv("DASHSCOPE_API_KEY")
             if not key:

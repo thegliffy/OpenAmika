@@ -339,6 +339,13 @@ def ollama_key():
         return ''
 
 
+def ollama_dialect():
+    try:
+        return str(json.loads((ROOT / 'config' / 'ollama.json').read_text('utf-8-sig')).get('dialect') or 'ollama')
+    except Exception:
+        return 'ollama'
+
+
 def ollama_checks():
     """[(level, name, detail)] when a role runs on Ollama: the server answers (GET /api/version) and every model in
     use is pulled (GET /api/tags). Nothing when no role uses Ollama."""
@@ -347,6 +354,21 @@ def ollama_checks():
         return []
     base = ollama_base()
     key = ollama_key()
+    if ollama_dialect() == 'openai':      # fork: an OpenAI-dialect server (ours: junos' Strata) answers /v1, not /api
+        data = http_json(base + '/v1/models', timeout=5, api_key=key)
+        if not isinstance(data, dict) or '_text' in data:
+            used = sorted({r for rs in models.values() for r in rs})
+            return [('err', 'Ollama', f'not answering at {base} — it is an OpenAI-dialect server; '
+                                      f'{", ".join(used)} run{"s" if len(used) == 1 else ""} on it')]
+        pulled = {str(m.get('id') or m.get('name') or '') for m in (data.get('data') or []) if isinstance(m, dict)}
+        out = [('ok', 'Ollama', f'OpenAI-dialect server at {base}')]
+        for model, used in models.items():
+            if model in pulled:
+                out.append(('ok', f'Ollama model {model}', f'pulled · {", ".join(used)}'))
+            else:
+                out.append(('err', f'Ollama model {model}', f'not served by {base} ({", ".join(used)} '
+                                                           f'run{"s" if len(used) == 1 else ""} on it)'))
+        return out
     version = http_json(base + '/api/version', timeout=3, api_key=key)
     if not isinstance(version, dict) or '_text' in version:
         roles = sorted({r for rs in models.values() for r in rs})

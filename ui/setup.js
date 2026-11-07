@@ -243,6 +243,7 @@
     }
     if (!$("olUrl").value.trim()) $("olUrl").value = ollamaInfo.base_url || "http://127.0.0.1:11434";
     if (ollamaInfo.api_key_set && !$("olKey").value) $("olKey").placeholder = "✓ key saved — type to replace";
+    $("olDialect").value = ollamaInfo.dialect || "ollama";
     const n = (ollamaInfo.models || []).length;
     $("olStatus").textContent = ollamaInfo.reachable
       ? "Ollama " + (ollamaInfo.live_version || "") + " is running · " + (n ? n + " model(s) detected" : "no models detected yet — press Detect")
@@ -262,7 +263,7 @@
     $("olDetect").disabled = true;
     $("olStatus").textContent = "asking Ollama…";
     try {
-      const r = await postAction("/api/build_f/ollama/detect", "ollama-detect", { base_url: $("olUrl").value.trim(), api_key: $("olKey").value.trim() });
+      const r = await postAction("/api/build_f/ollama/detect", "ollama-detect", { base_url: $("olUrl").value.trim(), api_key: $("olKey").value.trim(), dialect: $("olDialect").value });
       toast((r.models || []).length ? (r.models || []).length + " local model(s) detected — pick one and press Use this model." : "Ollama answered, but it has no models yet: ollama pull gemma3:27b (or another model of 27B or more)", !(r.models || []).length);
       await loadOllama();
       loadModels();   // the role grid now offers the local models too

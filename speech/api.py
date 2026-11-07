@@ -653,7 +653,7 @@ async def build_f_models():
 
 # ── the fully-local option: Ollama models, detected on the brain (config/ollama.json) ──
 _OLLAMA_FIELDS = ("ok", "base_url", "num_ctx", "keep_alive", "detected_at", "version", "live_version", "models",
-                  "reachable", "error", "in_use")
+                  "reachable", "error", "in_use", "api_key_set", "dialect")
 
 
 @app.get("/api/build_f/ollama")

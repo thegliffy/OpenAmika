@@ -1,0 +1,42 @@
+# Docker run path (fork addition) — Linux + NVIDIA GPU + nvidia-container-toolkit.
+# The container is just a Python 3.11 home for the launcher; the services it spawns
+# (web 53000, TTS 8002, embed 8011, vision 8014, speech) expect loopback ports, hence
+# host networking. Run from this directory after cloning the repo:
+#
+#   docker compose up -d
+#   docker exec -d openamika python3 -u launch.py
+#
+# Prerequisites the launcher expects to find inside the checkout: the documented
+# per-service venvs under envs/ and vendor/tts-engine (see the main README setup),
+# plus model weights (HuggingFace cache — mount it if it lives outside the container).
+services:
+  openamika:
+    image: python:3.11-bookworm
+    container_name: openamika
+    working_dir: /app
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ..:/app
+      # - ${HF_CACHE:-./hf-cache}:/root/.cache/huggingface
+      # - ${MODELS_DIR:-./models}:/root/models
+    network_mode: host
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    restart: unless-stopped
+
+  # Optional Ollama-API shim, for backends that only speak the OpenAI dialect through a
+  # translator (add the Ollama server's dialect field instead of running this when the
+  # backend already serves /v1 — that's the direct path; see docker/README.md).
+  # Start with:  docker compose --profile proxy up -d
+  ollama-proxy:
+    image: eyalrot2/ollama-openai-proxy:latest
+    container_name: openamika-ollama-proxy
+    profiles: ["proxy"]
+    env_file: .env
+    network_mode: host
+    volumes:
+      - ./proxy-patch/models.py:/app/src/models.py:ro
+      - ./proxy-patch/main_patched.py:/app/src/main.py:ro
+    restart: unless-stopped

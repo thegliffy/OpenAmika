@@ -4339,10 +4339,15 @@ async def ws_dialog(ws: WebSocket):
         await ws.send_json({"type": "ai_error", "message": "A service control is in progress. Reconnect when it finishes."})
         await ws.close(code=1008)
         return
-    if _dialog_active:
-        await ws.send_json({"type": "ai_error", "message": "OpenAmika is open in another tab. Disconnect it first."})
-        await ws.close(code=1008)
-        return
+    # Newest-wins (house rule, 2026-11-08): starting a place disconnects every
+    # other place instead of the new one being rejected. Kicked places get the
+    # "kicked" message first so their frontend parks instead of reconnecting.
+    for old in list(_dialog_sessions):
+        try:
+            await old.ws.send_json({"type": "kicked", "reason": "OpenAmika was opened in another place"})
+            await old.ws.close(code=4001)
+        except Exception:
+            pass
     _dialog_active = True
     session = None
     try:

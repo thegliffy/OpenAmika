@@ -637,6 +637,17 @@ registerProcessor('pcm-pusher', PCMPusher);`;
         resetEmote();
         toast(msg.message || "She hit an error.", true);
         break;
+      case "kicked":
+        // The server parked us because OpenAmika was opened in another place.
+        // Must NOT reconnect — that would kick the new place right back.
+        wsWanted = false;
+        clearTimeout(reconnectTimer);
+        camStop(true);
+        avatar.flush();
+        resetEmote();
+        toast(msg.reason || "OpenAmika was opened in another place.", true);
+        setPowerUI("Offline", "disconnected — opened in another place");
+        break;
       case "tts_error":
         if (msg.surface_last) surfaceClosed();         // the surface's final sentence failed: nothing left to wait for
         toast("TTS: " + (msg.error || "error"), true);
